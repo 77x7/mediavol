@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+
+set -u
+
+action="${1:-}"
+interval_ms="${VOLUME_REPEAT_INTERVAL_MS:-125}"
+runtime_dir="${XDG_RUNTIME_DIR:-/run/user/${UID}}"
+bin_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
+
+case "$action" in
+  focused-down|focused-up|cider-down|cider-up) ;;
+  *)
+    printf 'Usage: %s {focused-down|focused-up|cider-down|cider-up}\n' "${0##*/}" >&2
+    exit 2
+    ;;
+esac
+
+[[ "$interval_ms" =~ ^[0-9]+$ ]] && (( interval_ms > 0 )) || {
+  printf 'Invalid VOLUME_REPEAT_INTERVAL_MS: %s\n' "$interval_ms" >&2
+  exit 2
+}
+
+lock_file="${runtime_dir}/volume-repeat-${action}.lock"
+state_file="${runtime_dir}/volume-repeat-${action}.timestamp"
+
+exec {lock_fd}>"$lock_file" || exit 1
+flock -n "$lock_fd" || exit 0
+
+now="$(date +%s%3N)"
+last=0
+[[ -r "$state_file" ]] && read -r last < "$state_file"
+[[ "$last" =~ ^[0-9]+$ ]] || last=0
+
+(( now - last >= interval_ms )) || exit 0
+printf '%s\n' "$now" > "$state_file"
+
+case "$action" in
+  focused-down) "$bin_dir/focused-volume-down" ;;
+  focused-up) "$bin_dir/focused-volume-up" ;;
+  cider-down) "$bin_dir/ciderctl" volume-down ;;
+  cider-up) "$bin_dir/ciderctl" volume-up ;;
+esac

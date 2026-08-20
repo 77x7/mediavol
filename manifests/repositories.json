@@ -1,0 +1,12 @@
+{
+  "required": [
+    {"id": "cider", "kind": "vendor", "feature": "cider", "repo_file": "cider.repo", "review_required": true},
+    {"id": "blakegardner-xremap", "kind": "copr", "owner": "blakegardner", "project": "xremap", "feature": "xremap"},
+    {"id": "better-blur-dx", "kind": "copr", "owner": "infinality", "project": "kwin-effects-better-blur-dx", "feature": "plasma-style"}
+  ],
+  "optional": [
+    {"id": "ghostty", "kind": "copr", "owner": "alternateved", "project": "ghostty", "feature": "desktop-apps"},
+    {"id": "terra", "kind": "distribution", "feature": "desktop-apps", "nobara_only": true}
+  ],
+  "policy": "Nobara base repositories are supplied by the operating system and are never copied from a snapshot. Vendor bootstrap URLs and GPG fingerprints must be reviewed before repository automation is enabled."
+}

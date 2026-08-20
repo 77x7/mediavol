@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+json=0
+[[ "${1:-}" == --json ]] && json=1
+errors=()
+warnings=()
+
+add_error() { errors+=("$1"); }
+add_warning() { warnings+=("$1"); }
+
+for required in install.sh bin/mediavol bin/snapshot lib/common.sh lib/transaction.sh lib/install-assets.sh lib/apply-plasma-settings.sh lib/apply-plasma-layout.sh sources/plasma-layout/adaptive-panel.js manifests/features.json manifests/plasma-baseline.json manifests/assets.json assets/SHA256SUMS policy/include-paths.txt policy/exclude-paths.txt; do
+  [[ -e "$ROOT/$required" ]] || add_error "Missing repository file: $required"
+done
+
+jq -e '.features | type == "array" and length > 0 and all(.[]; (.id | type == "string" and length > 0) and ((.depends // []) | type == "array" and all(.[]; type == "string" and length > 0)))' "$ROOT/manifests/features.json" >/dev/null 2>&1 || add_error "Invalid features manifest"
+jq -e '[.features[].id] | length == (unique | length)' "$ROOT/manifests/features.json" >/dev/null 2>&1 || add_error "Feature manifest contains duplicate IDs"
+jq -e '.features as $features | [$features[].id] as $ids | $features | all(.[]; (.depends // []) as $dependencies | all($dependencies[]; . as $dependency | ($ids | index($dependency)) != null))' "$ROOT/manifests/features.json" >/dev/null 2>&1 || add_error "Feature manifest contains unknown dependencies"
+
+jq -e '(.supported_plasma | type == "string") and (.writes | type == "array" and length > 0 and all(.[]; (.file | type == "string" and length > 0 and (startswith("/") | not) and (contains("..") | not)) and (.group | type == "string" and length > 0) and (.key | type == "string" and length > 0) and (.value | type == "string" or type == "number" or type == "boolean") and (.scope | type == "string" and test("^(always|asset:[A-Za-z0-9_-]+|feature:[A-Za-z0-9_-]+)$"))))' "$ROOT/manifests/plasma-baseline.json" >/dev/null 2>&1 || add_error "Invalid portable Plasma baseline"
+
+while IFS= read -r archive; do
+  [[ -f "$ROOT/assets/$archive" ]] || add_error "Missing checksummed asset: $archive"
+done < <(awk '{sub(/^\.\//, "", $2); print $2}' "$ROOT/assets/SHA256SUMS")
+
+for direction in up down; do
+  launcher="$ROOT/home/.local/share/applications/net.local.focused-volume-${direction}.desktop"
+  grep -Fq 'X-KDE-GlobalAccel-CommandShortcut=true' "$launcher" || add_error "Focused-volume ${direction} launcher is not KDE shortcut-capable"
+done
+for wrapper in focused-volume-up focused-volume-down; do
+  grep -Fq 'focused-volume-common' "$ROOT/home/.local/bin/$wrapper" || add_error "Focused-volume wrapper lacks direct fallback: $wrapper"
+done
+focused_volume_metadata="$ROOT/home/.local/share/kwin/scripts/focused-volume-context/metadata.json"
+jq -e '.KPackageStructure == "KWin/Script" and .KPlugin.Id == "focused-volume-context"' "$focused_volume_metadata" >/dev/null 2>&1 || add_error "Focused-volume KWin script has invalid package metadata"
+grep -Fq 'enable --now focused-volume-daemon.service' "$ROOT/lib/install-automation.sh" || add_error "Focused-volume daemon is not started during installation"
+grep -Fq 'org.kde.KWin reconfigure' "$ROOT/lib/install-automation.sh" || add_error "KWin scripts are not reloaded during installation"
+
+grep -Fq 'interactive_wizard' "$ROOT/bin/mediavol" || add_error "Installer lacks an interactive TUI"
+grep -Fq 'gum confirm' "$ROOT/bin/mediavol" || add_error "Installer TUI lacks confirmation"
+grep -Fq 'managedPanel' "$ROOT/sources/plasma-layout/adaptive-panel.js" || add_error "Portable panels lack MediaVol ownership"
+grep -Fq 'screenCount' "$ROOT/sources/plasma-layout/adaptive-panel.js" || add_error "Portable panels do not target active displays"
+for widget in org.kde.plasma.kickoff org.kde.plasma.icontasks plasmusic-toolbar org.kde.plasma.systemtray org.kde.plasma.digitalclock; do
+  grep -Fq "$widget" "$ROOT/sources/plasma-layout/adaptive-panel.js" || add_error "Portable panel is missing widget: $widget"
+done
+
+portable_forbidden='(/home/|KScreen|edid|connector|screenMapping|kwinoutputconfig|ddcci|de\.davidhi\.ddcci|lastScreen|activityId)'
+for portable in "$ROOT/manifests/plasma-baseline.json" "$ROOT/sources/plasma-layout/adaptive-panel.js"; do
+  grep -Ein "$portable_forbidden" "$portable" >/dev/null && add_error "Portable source contains machine-specific state: ${portable#$ROOT/}" || true
+done
+
+while IFS= read -r file; do
+  bash -n "$file" >/dev/null 2>&1 || add_error "Shell syntax error: ${file#$ROOT/}"
+done < <(find "$ROOT" -type f \( -name '*.sh' -o -path "$ROOT/bin/*" -o -name install.sh \) -not -path '*/.git/*' -not -path '*/.rescue/*')
+
+secret_matches="$(grep -RIn --exclude-dir=.git --exclude-dir=.rescue --exclude='verify' --exclude='snapshot' --exclude='*.age' -E 'CIDER_API_TOKEN=[A-Za-z0-9_-]{12,}|BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY|User\.jwt|apitoken:[[:space:]]*[A-Za-z0-9]' "$ROOT" || true)"
+[[ -z "$secret_matches" ]] || add_error "Potential plaintext secret found"
+
+host_paths="$(grep -RIl --exclude-dir=.git --exclude-dir=.rescue --exclude-dir=plasma-exact --exclude='verify' --exclude='snapshot' --exclude='*.md' --exclude='*.json' --exclude='*.txt' '/home/puzll' "$ROOT" || true)"
+[[ -z "$host_paths" ]] || add_error "Unexpected /home/puzll references: $(tr '\n' ' ' <<< "$host_paths")"
+
+if command -v git >/dev/null 2>&1 && git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if git -C "$ROOT" ls-files | grep -q .; then
+    git -C "$ROOT" lfs fsck >/dev/null 2>&1 || add_warning "Git LFS objects are not fully available"
+  fi
+else
+  add_warning "MediaVol is not initialized as a Git repository yet"
+fi
+
+if (( json )); then
+  errors_json='[]'; warnings_json='[]'
+  (( ${#errors[@]} )) && errors_json="$(printf '%s\n' "${errors[@]}" | jq -R . | jq -s .)"
+  (( ${#warnings[@]} )) && warnings_json="$(printf '%s\n' "${warnings[@]}" | jq -R . | jq -s .)"
+  jq -n --argjson errors "$errors_json" --argjson warnings "$warnings_json" '{ok: ($errors|length == 0), errors: $errors, warnings: $warnings}'
+else
+  printf 'MediaVol verification: %s\n' "$([[ ${#errors[@]} -eq 0 ]] && printf PASS || printf FAIL)"
+  for warning in "${warnings[@]}"; do printf 'warning: %s\n' "$warning"; done
+  for error in "${errors[@]}"; do printf 'error: %s\n' "$error"; done
+fi
+
+(( ${#errors[@]} == 0 ))

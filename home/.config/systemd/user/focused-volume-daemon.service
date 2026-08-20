@@ -1,0 +1,13 @@
+[Unit]
+Description=Low-latency focused application volume daemon
+After=graphical-session.target pipewire-pulse.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/focused-volume-daemon --daemon
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=default.target

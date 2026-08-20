@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+
+set -u
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+dry_run=0
+[[ "${1:-}" == --dry-run ]] && dry_run=1
+
+staging="$(mktemp -d)"
+trap 'rm -rf "$staging"' EXIT
+
+copied=0
+missing=0
+while IFS= read -r relative; do
+  [[ -n "$relative" && "$relative" != \#* ]] || continue
+  source_path="$HOME/$relative"
+  if [[ -e "$source_path" ]]; then
+    destination="$staging/home/$relative"
+    mkdir -p "$(dirname "$destination")"
+    cp -a "$source_path" "$destination"
+    ((copied += 1))
+  else
+    printf 'missing: ~/%s\n' "$relative"
+    ((missing += 1))
+  fi
+done < "$ROOT/policy/include-paths.txt"
+
+if grep -RIl -E 'CIDER_API_TOKEN=[A-Za-z0-9_-]{12,}|BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY|User\.jwt' "$staging" 2>/dev/null | grep -q .; then
+  printf 'snapshot rejected: potential secret detected\n' >&2
+  exit 1
+fi
+
+if (( dry_run )); then
+  printf 'Snapshot dry run: %d files/directories staged, %d missing.\n' "$copied" "$missing"
+  find "$staging/home" -mindepth 1 -maxdepth 4 -printf '%P\n' | sort
+  exit 0
+fi
+
+printf 'Snapshot staging is ready at %s\n' "$staging"
+printf 'Automatic repository update is intentionally disabled until normalization rules for each KDE file are reviewed.\n'
+printf 'Run with --dry-run for the current safe inventory preview.\n'

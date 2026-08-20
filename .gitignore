@@ -1,0 +1,30 @@
+# Local Claude and rescue material are not repository content
+.claude/
+.rescue/
+
+# Runtime and transaction state
+.state/
+*.tmp
+*.lock
+
+# Secrets
+secrets/*.agekey
+secrets/*.key
+secrets/*.env
+secrets/ciderctl-config
+
+# Generated/build output
+**/build/
+**/CMakeFiles/
+**/.qt/
+**/*_autogen/
+**/Testing/
+**/node_modules/
+**/target/
+**/dist/
+
+# Caches and logs
+**/.cache/
+*.log
+icon-theme.cache
+mimeinfo.cache

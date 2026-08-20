@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../lib/common.sh
+source "$ROOT/lib/common.sh"
+# shellcheck source=../lib/transaction.sh
+source "$ROOT/lib/transaction.sh"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  mediavol install [--dry-run] [--features a,b] [--layout adaptive|skip]
+                   [--conflict preserve|replace|fail] [--non-interactive] [--yes]
+  mediavol snapshot [--dry-run]
+  mediavol verify [--json]
+  mediavol rollback <transaction-id> [--dry-run]
+USAGE
+}
+
+default_features() {
+  jq -r '[.features[] | select(.default) | .id] | join(",")' "$ROOT/manifests/features.json"
+}
+
+interactive_wizard() {
+  local choice selected
+  choice="$(gum choose --header 'MediaVol portable KDE baseline' \
+    'Recommended portable desktop' \
+    'Customize features' \
+    'Exit')" || exit 0
+  [[ "$choice" == Exit ]] && exit 0
+
+  FEATURES="$(default_features)"
+  if [[ "$choice" == 'Customize features' ]]; then
+    selected="$(jq -r '.features[] | [.id, .label, (.default | tostring)] | @tsv' "$ROOT/manifests/features.json" |
+      while IFS=$'\t' read -r id label default; do
+        printf '%s — %s\n' "$id" "$label"
+      done |
+      gum choose --no-limit --header 'Select MediaVol features' \
+        --selected 'core — Core tools' \
+        --selected 'automation — Custom automation and launchers' \
+        --selected 'plasma-style — Active Plasma style and assets' \
+        --selected 'plasma-settings — KDE shortcuts and KWin settings')" || exit 0
+    FEATURES="$(cut -d ' ' -f1 <<< "$selected" | paste -sd, -)"
+  fi
+
+  LAYOUT="$(gum choose --header 'Portable panel layout' \
+    'adaptive' \
+    'skip')" || exit 0
+  MEDIAVOL_CONFLICT="$(gum choose --header 'Existing managed files' \
+    'preserve' \
+    'replace' \
+    'fail')" || exit 0
+
+  printf 'MediaVol will install: %s\nLayout: %s panels on every active display\nConflict policy: %s\n' \
+    "$FEATURES" "$LAYOUT" "$MEDIAVOL_CONFLICT" |
+    gum style --border normal --padding '1 2' --border-foreground 212
+  gum confirm 'Apply this portable KDE baseline?' || exit 0
+}
+
+select_features() {
+  [[ -n "${FEATURES:-}" ]] && return 0
+  FEATURES="$(default_features)"
+}
+
+resolve_features() {
+  local manifest="$ROOT/manifests/features.json"
+  local id dependency requested feature
+  declare -A dependencies=() selected=() visiting=() resolved=()
+  local -a ordered=() requested_features=()
+
+  jq -e '.features | type == "array" and length > 0 and all(.[]; (.id | type == "string" and length > 0) and ((.depends // []) | type == "array" and all(.[]; type == "string" and length > 0)))' "$manifest" >/dev/null || die "Invalid feature manifest: $manifest"
+  jq -e '[.features[].id] | length == (unique | length)' "$manifest" >/dev/null || die "Invalid feature manifest: $manifest"
+  jq -e '.features as $features | [$features[].id] as $ids | $features | all(.[]; (.depends // []) as $dependencies | all($dependencies[]; . as $dependency | ($ids | index($dependency)) != null))' "$manifest" >/dev/null || die "Invalid feature manifest: $manifest"
+
+  while IFS=$'\t' read -r id dependency; do
+    dependencies["$id"]="$dependency"
+    ordered+=("$id")
+  done < <(jq -r '.features[] | [.id, ((.depends // []) | join(" "))] | @tsv' "$manifest")
+
+  IFS=',' read -r -a requested_features <<< "$FEATURES"
+  for requested in "${requested_features[@]}"; do
+    [[ -n "$requested" ]] || die "Feature list contains an empty entry"
+    [[ -v "dependencies[$requested]" ]] || die "Unknown feature: $requested"
+    [[ -z "${selected[$requested]:-}" ]] || die "Feature specified more than once: $requested"
+    selected["$requested"]=1
+  done
+
+  visit_feature() {
+    local current="$1"
+    [[ -n "${resolved[$current]:-}" ]] && return 0
+    [[ -z "${visiting[$current]:-}" ]] || die "Feature dependency cycle includes: $current"
+    visiting["$current"]=1
+    for dependency in ${dependencies[$current]}; do
+      visit_feature "$dependency"
+    done
+    unset 'visiting[$current]'
+    resolved["$current"]=1
+  }
+
+  for requested in "${requested_features[@]}"; do
+    visit_feature "$requested"
+  done
+
+  FEATURES=""
+  for feature in "${ordered[@]}"; do
+    [[ -n "${resolved[$feature]:-}" ]] || continue
+    FEATURES+="${FEATURES:+,}$feature"
+  done
+}
+
+feature_selected() {
+  [[ ",$FEATURES," == *,$1,* ]]
+}
+
+preflight_install() {
+  require_command jq
+  require_command sha256sum
+  if feature_selected plasma-settings; then
+    require_command kwriteconfig6
+  fi
+  if [[ "$LAYOUT" == adaptive && "${MEDIAVOL_DRY_RUN:-0}" != 1 ]]; then
+    require_command busctl
+  fi
+}
+
+install_selected() {
+  transaction_begin
+  export MEDIAVOL_DRY_RUN MEDIAVOL_CONFLICT MEDIAVOL_TRANSACTION_ID MEDIAVOL_TRANSACTION_DIR FEATURES
+  info "Resolved features: $FEATURES"
+  info "Plasma layout mode: $LAYOUT"
+  info "Conflict policy: $MEDIAVOL_CONFLICT"
+
+  "$ROOT/lib/install-repositories.sh"
+  "$ROOT/lib/install-packages.sh"
+
+  if feature_selected flatpaks-user || feature_selected flatpaks-system; then
+    "$ROOT/lib/install-flatpaks.sh"
+  fi
+  if feature_selected plasma-style; then
+    "$ROOT/lib/install-assets.sh"
+  fi
+  if feature_selected plasma-settings; then
+    "$ROOT/lib/apply-plasma-settings.sh"
+  fi
+  if [[ "$LAYOUT" == adaptive ]]; then
+    "$ROOT/lib/apply-plasma-layout.sh"
+  fi
+  if feature_selected automation; then
+    "$ROOT/lib/install-automation.sh"
+  fi
+  if feature_selected xremap; then
+    "$ROOT/lib/install-xremap.sh"
+  fi
+  if feature_selected cider; then
+    "$ROOT/lib/install-cider.sh"
+  fi
+
+  info "Selected restore steps completed successfully."
+}
+
+command_install() {
+  FEATURES=""
+  LAYOUT=adaptive
+  NON_INTERACTIVE=0
+  YES=0
+  explicit_options=0
+
+  while (( $# )); do
+    case "$1" in
+      --dry-run) MEDIAVOL_DRY_RUN=1; explicit_options=1 ;;
+      --features) (( $# >= 2 )) || die "--features requires a value"; FEATURES="$2"; explicit_options=1; shift ;;
+      --layout) (( $# >= 2 )) || die "--layout requires a value"; LAYOUT="$2"; explicit_options=1; shift ;;
+      --conflict) (( $# >= 2 )) || die "--conflict requires a value"; MEDIAVOL_CONFLICT="$2"; explicit_options=1; shift ;;
+      --non-interactive) NON_INTERACTIVE=1; explicit_options=1 ;;
+      --yes) YES=1; explicit_options=1 ;;
+      *) die "Unknown install option: $1" ;;
+    esac
+    shift
+  done
+  if (( ! explicit_options )) && [[ -t 0 && -t 1 ]] && command -v gum >/dev/null 2>&1; then
+    interactive_wizard
+  elif (( ! explicit_options )) && [[ -t 0 && -t 1 ]]; then
+    warn "Gum is unavailable; using the recommended portable desktop defaults."
+  fi
+  [[ "$LAYOUT" =~ ^(adaptive|skip)$ ]] || die "Invalid layout mode: $LAYOUT"
+  [[ "$MEDIAVOL_CONFLICT" =~ ^(preserve|replace|fail)$ ]] || die "Invalid conflict policy: $MEDIAVOL_CONFLICT"
+  require_command jq
+  select_features
+  if [[ "$LAYOUT" == adaptive && ",$FEATURES," != *,plasma-layout,* ]]; then
+    FEATURES="${FEATURES:+$FEATURES,}plasma-layout"
+  fi
+  resolve_features
+  preflight_install
+  install_selected
+}
+
+command_verify() {
+  exec "$ROOT/bin/verify" "$@"
+}
+
+command_snapshot() {
+  exec "$ROOT/bin/snapshot" "$@"
+}
+
+case "${1:-}" in
+  install) shift; command_install "$@" ;;
+  snapshot) shift; command_snapshot "$@" ;;
+  verify) shift; command_verify "$@" ;;
+  rollback) shift; [[ $# -ge 1 ]] || die "rollback requires a transaction ID"; transaction_id="$1"; shift; [[ "${1:-}" == --dry-run ]] && MEDIAVOL_DRY_RUN=1; rollback_transaction "$transaction_id" ;;
+  -h|--help|help|'') usage ;;
+  *) die "Unknown command: $1" ;;
+esac

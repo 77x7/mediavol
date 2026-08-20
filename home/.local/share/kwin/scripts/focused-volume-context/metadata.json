@@ -1,0 +1,12 @@
+{
+  "KPackageStructure": "KWin/Script",
+  "KPlugin": {
+    "Id": "focused-volume-context",
+    "Name": "Focused Volume Context",
+    "Description": "Reports active KWin window metadata to the MediaVol focused-volume daemon",
+    "Version": "1.0.0",
+    "License": "GPL-3.0-or-later"
+  },
+  "X-Plasma-API": "javascript",
+  "X-Plasma-MainScript": "code/main.js"
+}

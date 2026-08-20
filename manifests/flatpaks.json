@@ -1,0 +1,15 @@
+{
+  "user": [
+    {"application": "com.github.tchx84.Flatseal", "origin": "flathub", "branch": "stable"},
+    {"application": "io.github.kolunmi.Bazaar", "origin": "flathub", "branch": "stable"}
+  ],
+  "system": [
+    {"application": "com.github.wwmm.easyeffects", "origin": "flathub", "branch": "stable"},
+    {"application": "com.rustdesk.RustDesk", "origin": "flathub", "branch": "stable"},
+    {"application": "io.github.cudatext.CudaText-Qt", "origin": "flathub", "branch": "stable"},
+    {"application": "md.obsidian.Obsidian", "origin": "flathub", "branch": "stable"},
+    {"application": "nl.hjdskes.gcolor3", "origin": "flathub", "branch": "stable"},
+    {"application": "org.jellyfin.JellyfinDesktop", "origin": "jellyfindesktop-origin", "branch": "master", "local_bundle_required": true},
+    {"application": "org.localsend.localsend_app", "origin": "flathub", "branch": "stable"}
+  ]
+}

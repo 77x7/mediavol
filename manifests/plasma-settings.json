@@ -1,0 +1,11 @@
+{
+  "write": [
+    {"file":"kdeglobals","group":"KDE","key":"LookAndFeelPackage","value":"com.github.vinceliuice.Layan"},
+    {"file":"kdeglobals","group":"KDE","key":"widgetStyle","value":"kvantum-dark"},
+    {"file":"kdeglobals","group":"Icons","key":"Theme","value":"Fluent-purple-dark"},
+    {"file":"kcminputrc","group":"Mouse","key":"cursorTheme","value":"Bibata-Modern-Ice"},
+    {"file":"kwinrc","group":"org.kde.kdecoration2","key":"library","value":"org.kde.kwin.aurorae.v2"},
+    {"file":"kwinrc","group":"org.kde.kdecoration2","key":"theme","value":"__aurorae__svg__Utterly-Round-Dark-Solid"},
+    {"file":"Kvantum/kvantum.kvconfig","group":"General","key":"theme","value":"LayanSolidDark"}
+  ]
+}

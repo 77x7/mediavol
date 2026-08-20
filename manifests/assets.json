@@ -1,0 +1,30 @@
+{
+  "active_style": {
+    "global_theme": "com.github.vinceliuice.Layan",
+    "desktop_theme": "Layan",
+    "color_scheme": "Layan",
+    "icon_theme": "Fluent-purple-dark",
+    "cursor_theme": "Bibata-Modern-Ice",
+    "kvantum_theme": "LayanSolidDark",
+    "gtk_theme": "Layan-Dark-Solid",
+    "window_decoration": "Utterly-Round-Dark-Solid",
+    "wallpaper": "Layan"
+  },
+  "plasmoids": [
+    {"id": "plasmusic-toolbar", "version": "4.2.0", "required": true},
+    {"id": "de.davidhi.ddcci-brightness", "version": "0.1.10", "required": false, "feature": "ddc"}
+  ],
+  "kwin_scripts": [
+    {"id": "kzones", "version": "0.9.2"},
+    {"id": "rememberwindowpositions", "version": "6.0.0"},
+    {"id": "emoji-cord-context", "source": "emoji-cord-release"}
+  ],
+  "kwin_effects": [
+    {"id": "better_blur_dx", "source": "rpm"},
+    {"id": "kinetic_fadingpopups", "source": "user-asset"},
+    {"id": "keep-above-outline", "source": "unowned-native-plugin", "review_required": true}
+  ],
+  "manual_fonts": [
+    {"name": "modernz_icons.ttf", "destination": "/usr/local/share/fonts/m/modernz_icons.ttf", "review_required": true}
+  ]
+}

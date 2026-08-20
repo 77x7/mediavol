@@ -1,0 +1,12 @@
+keymap:
+  - name: Repeating application volume shortcuts
+    exact_match: true
+    remap:
+      Shift-F1:
+        launch: ["@HOME@/.local/bin/volume-repeat-dispatch", "focused-down"]
+      Shift-F2:
+        launch: ["@HOME@/.local/bin/volume-repeat-dispatch", "focused-up"]
+      Shift-F9:
+        launch: ["@HOME@/.local/bin/volume-repeat-dispatch", "cider-down"]
+      Shift-F10:
+        launch: ["@HOME@/.local/bin/volume-repeat-dispatch", "cider-up"]

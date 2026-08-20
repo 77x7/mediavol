@@ -1,0 +1,418 @@
+#!/usr/bin/env bash
+
+set -u
+
+action="${1:-}"
+step_raw=3277
+volume_max=65536
+
+KDOT="/usr/bin/kdotool"
+PACTL="/usr/bin/pactl"
+JQ="/usr/bin/jq"
+FLOCK="/usr/bin/flock"
+BUSCTL="/usr/bin/busctl"
+KICONFINDER="/usr/bin/kiconfinder6"
+APP_RESOLVER="${HOME}/.local/bin/focused-volume-app-resolver"
+
+runtime_dir="${XDG_RUNTIME_DIR:-/run/user/${UID}}"
+lock_file="${runtime_dir}/focused-volume.lock"
+no_stream_state="${runtime_dir}/focused-volume-no-stream.timestamp"
+
+notify() {
+  command -v notify-send >/dev/null 2>&1 && notify-send -a "Focused volume" -i "${3:-audio-volume-high}" "$1" "$2" || true
+}
+
+fail() {
+  notify "Focused volume" "$1"
+  printf 'focused-volume: %s\n' "$1" >&2
+  exit 1
+}
+
+case "$action" in
+  up|down) ;;
+  *)
+    printf 'Usage: %s {up|down}\n' "${0##*/}" >&2
+    exit 2
+    ;;
+esac
+
+for command_path in "$KDOT" "$PACTL" "$JQ" "$FLOCK" "$BUSCTL"; do
+  [[ -x "$command_path" ]] || fail "Required command is unavailable: ${command_path}"
+done
+
+exec {lock_fd}>"$lock_file" || fail "Could not open the volume lock."
+"$FLOCK" -n "$lock_fd" || exit 0
+
+window_uuid="$("$KDOT" getactivewindow 2>/dev/null)"
+[[ -n "$window_uuid" ]] || fail "Could not detect the focused window."
+
+window_json="$(
+  "$BUSCTL" --user --json=short call \
+    org.kde.KWin \
+    /KWin \
+    org.kde.KWin \
+    getWindowInfo \
+    s "$window_uuid" 2>/dev/null
+)" || fail "Could not read focused window information."
+
+"$JQ" -e 'type == "object" and (.data | type == "array") and (.data[0] | type == "object")' \
+  >/dev/null 2>&1 <<< "$window_json" || fail "KWin returned invalid window information."
+
+active_pid="$("$JQ" -r '.data[0].pid.data // ""' <<< "$window_json")"
+kwin_desktop_id="$("$JQ" -r '.data[0].desktopFile.data // ""' <<< "$window_json")"
+resource_class="$("$JQ" -r '.data[0].resourceClass.data // ""' <<< "$window_json")"
+resource_name="$("$JQ" -r '.data[0].resourceName.data // ""' <<< "$window_json")"
+
+valid_user_pid() {
+  local pid="$1"
+  local process_uid
+
+  [[ "$pid" =~ ^[0-9]+$ ]] && (( pid > 1 )) && [[ -r "/proc/${pid}/status" ]] || return 1
+  process_uid="$(awk '/^Uid:/ { print $2; exit }' "/proc/${pid}/status" 2>/dev/null)"
+  [[ "$process_uid" == "$UID" ]]
+}
+
+if ! valid_user_pid "$active_pid"; then
+  active_pid=""
+fi
+
+canonical_desktop_id=""
+canonical_storage_id=""
+desktop_name=""
+desktop_icon=""
+exec_command=""
+desktop_wmclass=""
+identity_json='{"found":false}'
+
+if [[ -x "$APP_RESOLVER" ]]; then
+  identity_json="$(
+    "$APP_RESOLVER" \
+      --desktop-file "$kwin_desktop_id" \
+      --pid "${active_pid:-0}" \
+      --resource-class "$resource_class" \
+      --resource-name "$resource_name" 2>/dev/null
+  )" || identity_json='{"found":false}'
+fi
+
+if "$JQ" -e 'type == "object" and .found == true' >/dev/null 2>&1 <<< "$identity_json"; then
+  canonical_desktop_id="$("$JQ" -r '.desktopId // ""' <<< "$identity_json")"
+  canonical_storage_id="$("$JQ" -r '.storageId // ""' <<< "$identity_json")"
+  desktop_name="$("$JQ" -r '.name // ""' <<< "$identity_json")"
+  desktop_icon="$("$JQ" -r '.icon // ""' <<< "$identity_json")"
+  exec_command="$("$JQ" -r '.executable // ""' <<< "$identity_json")"
+  desktop_wmclass="$("$JQ" -r '.startupWMClass // ""' <<< "$identity_json")"
+fi
+
+valid_icon() {
+  local icon="$1"
+
+  [[ -n "$icon" ]] || return 1
+  if [[ "$icon" == /* ]]; then
+    [[ -f "$icon" && -r "$icon" ]] || return 1
+  else
+    [[ -x "$KICONFINDER" ]] || return 1
+    "$KICONFINDER" "$icon" >/dev/null 2>&1 || return 1
+  fi
+  printf '%s\n' "$icon"
+}
+
+app_name="${desktop_name:-${resource_class:-${resource_name:-Focused application}}}"
+app_icon="audio-volume-high"
+service_icon_valid=0
+if resolved_icon="$(valid_icon "$desktop_icon")"; then
+  app_icon="$resolved_icon"
+  service_icon_valid=1
+elif [[ -x "$APP_RESOLVER" ]]; then
+  x11_identity_json="$(
+    "$APP_RESOLVER" \
+      --active-x11 \
+      --pid "${active_pid:-0}" \
+      --resource-class "$resource_class" \
+      --resource-name "$resource_name" 2>/dev/null
+  )" || x11_identity_json='{"found":false}'
+  if "$JQ" -e 'type == "object" and .found == true' >/dev/null 2>&1 <<< "$x11_identity_json"; then
+    x11_name="$("$JQ" -r '.name // ""' <<< "$x11_identity_json")"
+    x11_icon="$("$JQ" -r '.icon // ""' <<< "$x11_identity_json")"
+    [[ -n "$x11_name" ]] && app_name="$x11_name"
+    if resolved_icon="$(valid_icon "$x11_icon")"; then
+      app_icon="$resolved_icon"
+      service_icon_valid=1
+    fi
+  fi
+fi
+
+specific_app_unit() {
+  local pid="$1"
+  local cgroup_path
+  local component
+  local result=""
+
+  [[ "$pid" =~ ^[0-9]+$ ]] && [[ -r "/proc/${pid}/cgroup" ]] || return 1
+  cgroup_path="$(awk -F: '$1 == "0" { print $3; exit }' "/proc/${pid}/cgroup" 2>/dev/null)"
+  [[ -n "$cgroup_path" ]] || return 1
+
+  IFS='/' read -ra components <<< "$cgroup_path"
+  for component in "${components[@]}"; do
+    case "$component" in
+      app-*.scope|app-*.service) result="$component" ;;
+    esac
+  done
+
+  [[ -n "$result" ]] || return 1
+  printf '%s\n' "$result"
+}
+
+is_ancestor() {
+  local ancestor="$1"
+  local pid="$2"
+  local parent
+  local depth=0
+
+  [[ "$ancestor" =~ ^[0-9]+$ && "$pid" =~ ^[0-9]+$ ]] || return 1
+
+  while (( pid > 1 && depth < 64 )); do
+    [[ "$pid" == "$ancestor" ]] && return 0
+    [[ -r "/proc/${pid}/status" ]] || return 1
+    parent="$(awk '/^PPid:/ { print $2; exit }' "/proc/${pid}/status" 2>/dev/null)"
+    [[ "$parent" =~ ^[0-9]+$ && "$parent" != "$pid" ]] || return 1
+    pid="$parent"
+    ((depth += 1))
+  done
+
+  return 1
+}
+
+normalize() {
+  local value="${1,,}"
+  value="${value%.desktop}"
+  printf '%s\n' "$value"
+}
+
+streams_json="$("$PACTL" -f json list sink-inputs 2>/dev/null)" || fail "Could not query application audio streams."
+clients_json="$("$PACTL" -f json list clients 2>/dev/null)" || fail "Could not query application audio clients."
+"$JQ" -e 'type == "array"' >/dev/null 2>&1 <<< "$streams_json" || fail "Audio server returned invalid stream data."
+"$JQ" -e 'type == "array"' >/dev/null 2>&1 <<< "$clients_json" || fail "Audio server returned invalid client data."
+
+declare -A client_pid=()
+while IFS=$'\x1f' read -r client_index primary_pid secure_pid; do
+  [[ "$client_index" =~ ^[0-9]+$ ]] || continue
+  if valid_user_pid "$primary_pid"; then
+    client_pid["$client_index"]="$primary_pid"
+  elif valid_user_pid "$secure_pid"; then
+    client_pid["$client_index"]="$secure_pid"
+  fi
+done < <(
+  "$JQ" -r '
+    .[] |
+    [
+      (.index | tostring),
+      (.properties["application.process.id"] // ""),
+      (.properties["pipewire.sec.pid"] // "")
+    ] | join("")
+  ' <<< "$clients_json"
+)
+
+declare -a stream_indexes=()
+declare -A stream_pid=()
+declare -A stream_client=()
+declare -A stream_name=()
+declare -A stream_binary=()
+declare -A stream_icon=()
+declare -A stream_app_id=()
+declare -A stream_desktop=()
+declare -A stream_channels=()
+
+while IFS=$'\x1f' read -r index client_index pid name binary icon app_id stream_desktop_id channels; do
+  [[ "$index" =~ ^[0-9]+$ ]] || continue
+  stream_indexes+=("$index")
+  stream_client["$index"]="$client_index"
+  if valid_user_pid "$pid"; then
+    stream_pid["$index"]="$pid"
+  elif [[ "$client_index" =~ ^[0-9]+$ && -n "${client_pid[$client_index]:-}" ]]; then
+    stream_pid["$index"]="${client_pid[$client_index]}"
+  else
+    stream_pid["$index"]=""
+  fi
+  stream_name["$index"]="$name"
+  stream_binary["$index"]="$binary"
+  stream_icon["$index"]="$icon"
+  stream_app_id["$index"]="$app_id"
+  stream_desktop["$index"]="$stream_desktop_id"
+  stream_channels["$index"]="$channels"
+done < <(
+  "$JQ" -r '
+    .[] |
+    [
+      (.index | tostring),
+      (.client | tostring),
+      (.properties["application.process.id"] // ""),
+      (.properties["application.name"] // ""),
+      (.properties["application.process.binary"] // ""),
+      (.properties["application.icon_name"] // ""),
+      (.properties["application.id"] // .properties["flatpak.app-id"] // ""),
+      (.properties["application.desktop"] // .properties["application.desktop_file"] // ""),
+      ([.volume[].value] | map(tostring) | join(","))
+    ] | join("")
+  ' <<< "$streams_json"
+)
+
+declare -a matched=()
+focused_unit=""
+if [[ -n "$active_pid" ]]; then
+  focused_unit="$(specific_app_unit "$active_pid" 2>/dev/null || true)"
+fi
+
+if [[ -n "$active_pid" ]]; then
+  for index in "${stream_indexes[@]}"; do
+    pid="${stream_pid[$index]}"
+    valid_user_pid "$pid" || continue
+    if is_ancestor "$active_pid" "$pid" || is_ancestor "$pid" "$active_pid"; then
+      matched+=("$index")
+    fi
+  done
+fi
+
+if (( ${#matched[@]} == 0 )) && [[ -n "$focused_unit" ]]; then
+  for index in "${stream_indexes[@]}"; do
+    pid="${stream_pid[$index]}"
+    valid_user_pid "$pid" || continue
+    stream_unit="$(specific_app_unit "$pid" 2>/dev/null || true)"
+    [[ -n "$stream_unit" && "$stream_unit" == "$focused_unit" ]] && matched+=("$index")
+  done
+fi
+
+if (( ${#matched[@]} == 0 )); then
+  focused_desktop="$(normalize "$canonical_desktop_id")"
+  focused_storage="$(normalize "$canonical_storage_id")"
+  focused_kwin_desktop="$(normalize "$kwin_desktop_id")"
+  focused_class="$(normalize "$resource_class")"
+  focused_resource="$(normalize "$resource_name")"
+  focused_name="$(normalize "$desktop_name")"
+  focused_icon="$(normalize "$desktop_icon")"
+  focused_exec="$(normalize "$exec_command")"
+  focused_wmclass="$(normalize "$desktop_wmclass")"
+
+  for index in "${stream_indexes[@]}"; do
+    candidate_app_id="$(normalize "${stream_app_id[$index]}")"
+    candidate_desktop="$(normalize "${stream_desktop[$index]}")"
+    candidate_binary="$(normalize "${stream_binary[$index]}")"
+    candidate_name="$(normalize "${stream_name[$index]}")"
+    candidate_icon="$(normalize "${stream_icon[$index]}")"
+    score=0
+    strong=0
+
+    if {
+      [[ -n "$focused_desktop" ]] && {
+        [[ "$candidate_app_id" == "$focused_desktop" ]] ||
+        [[ "$candidate_desktop" == "$focused_desktop" ]];
+      };
+    } || {
+      [[ -n "$focused_storage" ]] && {
+        [[ "$candidate_app_id" == "$focused_storage" ]] ||
+        [[ "$candidate_desktop" == "$focused_storage" ]];
+      };
+    } || {
+      [[ -n "$focused_kwin_desktop" ]] && {
+        [[ "$candidate_app_id" == "$focused_kwin_desktop" ]] ||
+        [[ "$candidate_desktop" == "$focused_kwin_desktop" ]];
+      };
+    }; then
+      strong=1
+    fi
+
+    if [[ -n "$candidate_binary" ]] && {
+      [[ -n "$focused_class" && "$candidate_binary" == "$focused_class" ]] ||
+      [[ -n "$focused_resource" && "$candidate_binary" == "$focused_resource" ]] ||
+      [[ -n "$focused_exec" && "$candidate_binary" == "$focused_exec" ]] ||
+      [[ -n "$focused_wmclass" && "$candidate_binary" == "$focused_wmclass" ]];
+    }; then
+      ((score += 1))
+    fi
+
+    if [[ -n "$candidate_name" ]] && {
+      [[ -n "$focused_name" && "$candidate_name" == "$focused_name" ]] ||
+      [[ -n "$focused_class" && "$candidate_name" == "$focused_class" ]];
+    }; then
+      ((score += 1))
+    fi
+
+    if [[ -n "$candidate_icon" ]] && {
+      [[ -n "$focused_icon" && "$candidate_icon" == "$focused_icon" ]] ||
+      [[ -n "$focused_desktop" && "$candidate_icon" == "$focused_desktop" ]];
+    }; then
+      ((score += 1))
+    fi
+
+    if (( strong || score >= 2 )); then
+      matched+=("$index")
+    fi
+  done
+fi
+
+if (( ${#matched[@]} == 0 )); then
+  now="$(date +%s)"
+  previous=0
+  [[ -r "$no_stream_state" ]] && read -r previous < "$no_stream_state"
+  [[ "$previous" =~ ^[0-9]+$ ]] || previous=0
+
+  if (( now - previous >= 2 )); then
+    notify "Focused volume" "No audio stream found for ${app_name}." "$app_icon"
+    printf '%s\n' "$now" > "$no_stream_state"
+  fi
+  exit 1
+fi
+
+declare -a updated=()
+for index in "${matched[@]}"; do
+  IFS=',' read -ra current_channels <<< "${stream_channels[$index]}"
+  (( ${#current_channels[@]} > 0 )) || continue
+  targets=()
+
+  for current in "${current_channels[@]}"; do
+    [[ "$current" =~ ^[0-9]+$ ]] || continue 2
+    if [[ "$action" == "up" ]]; then
+      target=$(( current + step_raw ))
+      (( target > volume_max )) && target=$volume_max
+    else
+      target=$(( current - step_raw ))
+      (( target < 0 )) && target=0
+    fi
+    targets+=("$target")
+  done
+
+  if "$PACTL" set-sink-input-volume "$index" "${targets[@]}" >/dev/null 2>&1; then
+    updated+=("$index")
+    [[ -n "${stream_name[$index]}" && -z "$desktop_name" ]] && app_name="${stream_name[$index]}"
+    if (( service_icon_valid == 0 )) && resolved_icon="$(valid_icon "${stream_icon[$index]}")"; then
+      app_icon="$resolved_icon"
+      service_icon_valid=1
+    fi
+  fi
+done
+
+(( ${#updated[@]} > 0 )) || fail "The focused application's audio stream disappeared."
+
+result_json="$("$PACTL" -f json list sink-inputs 2>/dev/null)" || result_json='[]'
+max_percent=-1
+
+for index in "${updated[@]}"; do
+  percent="$(
+    "$JQ" -r --argjson index "$index" '
+      .[] | select(.index == $index) |
+      [.volume[].value] |
+      if length == 0 then empty else ((add / length / 65536 * 100) | round) end
+    ' <<< "$result_json"
+  )"
+  [[ "$percent" =~ ^[0-9]+$ ]] || continue
+  (( percent > 100 )) && percent=100
+  (( percent > max_percent )) && max_percent=$percent
+done
+
+if (( max_percent >= 0 )); then
+  "$BUSCTL" --user call \
+    org.kde.plasmashell \
+    /org/kde/osdService \
+    org.kde.osdService \
+    mediaPlayerVolumeChanged \
+    iss "$max_percent" "$app_name" "$app_icon" >/dev/null 2>&1 || true
+fi

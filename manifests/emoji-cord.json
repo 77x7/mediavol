@@ -1,0 +1,11 @@
+{
+  "status": "awaiting-public-release",
+  "host": "https://codeberg.org",
+  "repository": null,
+  "version": null,
+  "release_asset": null,
+  "sha256": null,
+  "settings": ".config/emoji-cord/settings.json",
+  "usage_history": ".local/share/Emoji-cord/usage.json",
+  "publication_requires_explicit_confirmation": true
+}

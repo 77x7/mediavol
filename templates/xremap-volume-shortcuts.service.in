@@ -1,0 +1,13 @@
+[Unit]
+Description=Repeating focused-app and Cider volume shortcuts
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/sg input -c '/usr/bin/xremap --watch=config,device @HOME@/.config/xremap/focused-volume.yml'
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

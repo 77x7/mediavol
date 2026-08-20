@@ -1,0 +1,26 @@
+# Portable automation
+.config/xremap/focused-volume.yml
+.config/systemd/user/xremap-volume-shortcuts.service
+.config/systemd/user/focused-volume-daemon.service
+.config/emoji-cord/settings.json
+.local/bin/ciderctl
+.local/bin/focused-volume-common
+.local/bin/focused-volume-up
+.local/bin/focused-volume-down
+.local/share/kwin/scripts/focused-volume-context
+.local/bin/volume-repeat-dispatch
+.local/bin/gamebar-audio-overlay
+.local/bin/gamebar-audio-overlay.sh
+.local/share/applications/net.local.ciderctl.desktop
+.local/share/applications/net.local.ciderctl-2.desktop
+.local/share/applications/net.local.ciderctl-3.desktop
+.local/share/applications/net.local.ciderctl-4.desktop
+.local/share/applications/net.local.ciderctl-5.desktop
+.local/share/applications/net.local.focused-volume-up.desktop
+.local/share/applications/net.local.focused-volume-down.desktop
+.local/share/applications/net.local.gamebar-audio-overlay.sh.desktop
+
+# Portable KDE intent
+.config/kdeglobals
+.config/kglobalshortcutsrc
+.config/kscreenlockerrc

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+
+if "$HOME/.local/bin/focused-volume-daemon" down; then
+  exit 0
+fi
+systemctl --user start focused-volume-daemon.service >/dev/null 2>&1 || true
+if "$HOME/.local/bin/focused-volume-daemon" down; then
+  exit 0
+fi
+exec "$HOME/.local/bin/focused-volume-common" down

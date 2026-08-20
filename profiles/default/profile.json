@@ -1,0 +1,8 @@
+{
+  "id": "default",
+  "layout": "adaptive",
+  "features": ["core", "automation", "plasma-style", "plasma-settings"],
+  "prompt_features": ["xremap", "cider", "emoji-cord", "flatpaks-user", "flatpaks-system", "gaming", "ddc", "openrgb", "manual-fonts"],
+  "hardware_auto_features": ["nvidia", "ddc", "openrgb"],
+  "secret_policy": "Cider credentials and login state are configured manually after restore"
+}

@@ -1,0 +1,537 @@
+#!/usr/bin/env bash
+
+# Cider-only KDE shortcut helper for Cider 4.x on KDE Wayland.
+#
+# Playback:
+#   1. Uses Cider's exact MPRIS service: org.mpris.MediaPlayer2.cider
+#   2. Falls back to Cider's local API if MPRIS is absent
+#
+# Volume:
+#   Uses Cider's MPRIS volume and Plasma's media-player volume OSD.
+
+set -u
+
+CONFIG="${CIDERCTL_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ciderctl/config}"
+
+if [[ -f "$CONFIG" ]]; then
+  # shellcheck disable=SC1090
+  . "$CONFIG"
+fi
+
+CIDER_API_HOST="${CIDER_API_HOST:-127.0.0.1}"
+CIDER_API_PORT="${CIDER_API_PORT:-10767}"
+CIDER_API_TOKEN="${CIDER_API_TOKEN:-}"
+CIDER_VOLUME_STEP="${CIDER_VOLUME_STEP:-5%}"
+CIDER_START_PLAYLIST="${CIDER_START_PLAYLIST:-Liked Songs}"
+CIDER_START_TIMEOUT="${CIDER_START_TIMEOUT:-60}"
+CIDER_MPRIS_SERVICE="org.mpris.MediaPlayer2.cider"
+CIDER_MPRIS_PATH="/org/mpris/MediaPlayer2"
+CIDER_MPRIS_PLAYER_INTERFACE="org.mpris.MediaPlayer2.Player"
+PLASMA_OSD_SERVICE="org.kde.plasmashell"
+PLASMA_OSD_PATH="/org/kde/osdService"
+PLASMA_OSD_INTERFACE="org.kde.osdService"
+
+notify() {
+  command -v notify-send >/dev/null 2>&1 && notify-send "Cider" "$*" || true
+}
+
+mpris_available() {
+  command -v busctl >/dev/null 2>&1 || return 1
+  busctl --user get-property "$CIDER_MPRIS_SERVICE" "$CIDER_MPRIS_PATH" org.mpris.MediaPlayer2 Identity >/dev/null 2>&1
+}
+
+mpris_call() {
+  local method="$1"
+
+  command -v busctl >/dev/null 2>&1 || return 1
+
+  busctl --user call \
+    "$CIDER_MPRIS_SERVICE" \
+    "$CIDER_MPRIS_PATH" \
+    "$CIDER_MPRIS_PLAYER_INTERFACE" \
+    "$method" >/dev/null 2>&1
+}
+
+api_call() {
+  local endpoint="$1"
+  local url="http://${CIDER_API_HOST}:${CIDER_API_PORT}/api/v1/playback/${endpoint}"
+  local status
+  local body
+  local err
+
+  command -v curl >/dev/null 2>&1 || return 1
+  [[ -n "$CIDER_API_TOKEN" ]] || return 1
+
+  body="$(mktemp)"
+  err="$(mktemp)"
+
+  status="$(
+    curl -sS -o "$body" \
+      -w '%{http_code}' \
+      -X POST \
+      -H 'accept: application/json' \
+      -H "apitoken: ${CIDER_API_TOKEN}" \
+      -H "apptoken: ${CIDER_API_TOKEN}" \
+      "$url" 2>"$err"
+  )"
+
+  if [[ "$status" == "405" ]]; then
+    status="$(
+      curl -sS -o "$body" \
+        -w '%{http_code}' \
+        -H 'accept: application/json' \
+        -H "apitoken: ${CIDER_API_TOKEN}" \
+        -H "apptoken: ${CIDER_API_TOKEN}" \
+        "$url" 2>"$err"
+    )"
+  fi
+
+  rm -f "$body" "$err"
+
+  [[ "$status" =~ ^2[0-9][0-9]$ ]]
+}
+
+transport() {
+  local mpris_method="$1"
+  local api_endpoint="$2"
+
+  if mpris_call "$mpris_method"; then
+    exit 0
+  fi
+
+  if api_call "$api_endpoint"; then
+    exit 0
+  fi
+
+  notify "Cider control failed. MPRIS and API fallback both failed."
+  exit 1
+}
+
+play_pause() {
+  local playback_status
+  local mpris_method
+  local api_endpoint
+
+  playback_status="$(mpris_status 2>/dev/null || true)"
+  if [[ "$playback_status" == "Playing" ]]; then
+    mpris_method=Pause
+    api_endpoint=pause
+  else
+    mpris_method=Play
+    api_endpoint=play
+  fi
+
+  if api_call "$api_endpoint" || mpris_call "$mpris_method"; then
+    return 0
+  fi
+
+  notify "Cider play/pause failed through MPRIS and the API."
+  return 1
+}
+
+cider_running() {
+  pgrep -x Cider >/dev/null 2>&1
+}
+
+api_json() {
+  local method="$1"
+  local endpoint="$2"
+  local payload="${3:-}"
+  local url="http://${CIDER_API_HOST}:${CIDER_API_PORT}${endpoint}"
+  local body
+  local status
+
+  command -v curl >/dev/null 2>&1 || return 1
+  [[ -n "$CIDER_API_TOKEN" ]] || return 1
+
+  body="$(mktemp)" || return 1
+  if [[ "$method" == "GET" ]]; then
+    status="$(
+      curl -sS --connect-timeout 1 --max-time 2 -o "$body" -w '%{http_code}' \
+        -H 'accept: application/json' \
+        -H "apitoken: ${CIDER_API_TOKEN}" \
+        -H "apptoken: ${CIDER_API_TOKEN}" \
+        "$url"
+    )" || {
+      rm -f "$body"
+      return 1
+    }
+  else
+    status="$(
+      curl -sS --connect-timeout 1 --max-time 2 -o "$body" -w '%{http_code}' \
+        -X "$method" \
+        -H 'accept: application/json' \
+        -H 'content-type: application/json' \
+        -H "apitoken: ${CIDER_API_TOKEN}" \
+        -H "apptoken: ${CIDER_API_TOKEN}" \
+        --data "$payload" \
+        "$url"
+    )" || {
+      rm -f "$body"
+      return 1
+    }
+  fi
+
+  if [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then
+    rm -f "$body"
+    return 1
+  fi
+
+  command cat "$body"
+  rm -f "$body"
+}
+
+shuffle_mode() {
+  local response
+
+  response="$(api_json GET /api/v1/playback/shuffle-mode)" || return 1
+  jq -er 'select(.status == "ok") | .value | select(type == "number")' <<< "$response"
+}
+
+ensure_shuffle_on() {
+  local mode
+
+  mode="$(shuffle_mode)" || return 1
+  if [[ "$mode" == "0" ]]; then
+    api_json POST /api/v1/playback/toggle-shuffle '{}' >/dev/null || return 1
+    mode="$(shuffle_mode)" || return 1
+  fi
+  [[ "$mode" == "1" ]]
+}
+
+now_playing_id() {
+  local response
+
+  response="$(api_json GET /api/v1/playback/now-playing)" || return 1
+  jq -er '.info.playParams.id | select(type == "string" and length > 0)' <<< "$response"
+}
+
+find_start_playlist() {
+  local path="/v1/me/library/playlists?limit=100"
+  local response
+  local page
+  local matches='[]'
+  local next
+
+  while [[ -n "$path" ]]; do
+    page="$(jq -cn --arg path "$path" '{path: $path}')"
+    response="$(api_json POST /api/v1/amapi/run-v3 "$page")" || return 1
+    jq -e '.data.data | type == "array"' >/dev/null 2>&1 <<< "$response" || return 1
+
+    matches="$(
+      jq -cn \
+        --argjson previous "$matches" \
+        --argjson current "$(jq --arg name "$CIDER_START_PLAYLIST" '[.data.data[] | select(.attributes.name == $name) | {id, type}]' <<< "$response")" \
+        '$previous + $current'
+    )" || return 1
+
+    next="$(jq -r '.data.next // empty' <<< "$response")"
+    [[ -z "$next" || "$next" == /v1/me/library/playlists* ]] || return 1
+    path="$next"
+  done
+
+  [[ "$(jq 'length' <<< "$matches")" == "1" ]] || return 1
+  jq -c '.[0]' <<< "$matches"
+}
+
+start_liked_songs() {
+  local deadline
+  local playlist
+  local payload
+  local first_track
+  local shuffled_track
+
+  for dependency in Cider curl jq flock pgrep; do
+    command -v "$dependency" >/dev/null 2>&1 || {
+      notify "Cider startup requires ${dependency}."
+      return 1
+    }
+  done
+  [[ -n "$CIDER_API_TOKEN" ]] || {
+    notify "Cider API token is not configured."
+    return 1
+  }
+  [[ "$CIDER_START_TIMEOUT" =~ ^[0-9]+$ ]] || {
+    notify "Invalid CIDER_START_TIMEOUT: ${CIDER_START_TIMEOUT}"
+    return 1
+  }
+
+  nohup Cider >/dev/null 2>&1 </dev/null {play_pause_lock_fd}>&- &
+  disown || true
+
+  deadline=$(( SECONDS + CIDER_START_TIMEOUT ))
+  until shuffle_mode >/dev/null 2>&1; do
+    if (( SECONDS >= deadline )); then
+      notify "Cider launched, but its API was not ready within ${CIDER_START_TIMEOUT} seconds."
+      return 1
+    fi
+    sleep 0.25
+  done
+
+  playlist=""
+  until playlist="$(find_start_playlist 2>/dev/null)"; do
+    if (( SECONDS >= deadline )); then
+      notify "Could not find exactly one playlist named ${CIDER_START_PLAYLIST}."
+      return 1
+    fi
+    sleep 0.5
+  done
+
+  payload="$(jq -c '{type, id}' <<< "$playlist")"
+  until api_json POST /api/v1/playback/play-item "$payload" >/dev/null 2>&1; do
+    if (( SECONDS >= deadline )); then
+      notify "Could not load ${CIDER_START_PLAYLIST}."
+      return 1
+    fi
+    sleep 0.5
+  done
+
+  first_track=""
+  until first_track="$(now_playing_id 2>/dev/null)"; do
+    if (( SECONDS >= deadline )); then
+      notify "${CIDER_START_PLAYLIST} loaded, but its queue was not ready."
+      return 1
+    fi
+    sleep 0.5
+  done
+
+  sleep 0.5
+  until ensure_shuffle_on; do
+    if (( SECONDS >= deadline )); then
+      notify "${CIDER_START_PLAYLIST} loaded, but shuffle could not be enabled."
+      return 1
+    fi
+    sleep 0.5
+  done
+
+  api_call next >/dev/null 2>&1 || {
+    notify "${CIDER_START_PLAYLIST} loaded, but its shuffled queue could not be advanced."
+    return 1
+  }
+
+  shuffled_track=""
+  until shuffled_track="$(now_playing_id 2>/dev/null)" && [[ "$shuffled_track" != "$first_track" ]]; do
+    if (( SECONDS >= deadline )); then
+      notify "${CIDER_START_PLAYLIST} loaded, but a shuffled starting track was not selected."
+      return 1
+    fi
+    sleep 0.25
+  done
+
+  until [[ "$(mpris_status 2>/dev/null)" == "Playing" ]]; do
+    api_call play >/dev/null 2>&1 || true
+    sleep 0.5
+    if (( SECONDS >= deadline )); then
+      notify "${CIDER_START_PLAYLIST} loaded, but playback could not be started."
+      return 1
+    fi
+  done
+}
+
+mpris_volume() {
+  local value
+
+  command -v busctl >/dev/null 2>&1 || return 1
+
+  value="$(
+    busctl --user get-property \
+      "$CIDER_MPRIS_SERVICE" \
+      "$CIDER_MPRIS_PATH" \
+      "$CIDER_MPRIS_PLAYER_INTERFACE" \
+      Volume 2>/dev/null
+  )" || return 1
+
+  [[ "$value" == d\ * ]] || return 1
+  printf '%s\n' "${value#d }"
+}
+
+plasma_osd_available() {
+  command -v busctl >/dev/null 2>&1 || return 1
+
+  busctl --user introspect \
+    "$PLASMA_OSD_SERVICE" \
+    "$PLASMA_OSD_PATH" \
+    "$PLASMA_OSD_INTERFACE" 2>/dev/null |
+    grep -q 'mediaPlayerVolumeChanged'
+}
+
+volume_step() {
+  local step="${CIDER_VOLUME_STEP%%%}"
+
+  awk -v step="$step" '
+    BEGIN {
+      if (step !~ /^[0-9]+([.][0-9]+)?$/ || step <= 0) exit 1
+      printf "%.10g\n", step / 100
+    }
+  '
+}
+
+volume_change() {
+  local direction="$1"
+  local lock_root="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
+  local lock_file="${lock_root}/ciderctl-volume-${UID}.lock"
+  local lock_fd
+  local step
+  local current
+  local new_volume
+  local percentage
+  local dependency
+
+  for dependency in busctl flock awk grep; do
+    if ! command -v "$dependency" >/dev/null 2>&1; then
+      notify "Volume control requires ${dependency}."
+      return 1
+    fi
+  done
+
+  if ! step="$(volume_step)"; then
+    notify "Invalid CIDER_VOLUME_STEP: ${CIDER_VOLUME_STEP}"
+    return 1
+  fi
+
+  exec {lock_fd}>"$lock_file" || {
+    notify "Could not open the Cider volume lock."
+    return 1
+  }
+  flock "$lock_fd" || {
+    notify "Could not lock Cider volume control."
+    return 1
+  }
+
+  if ! current="$(mpris_volume)"; then
+    notify "Cider's MPRIS volume is unavailable."
+    return 1
+  fi
+
+  if ! read -r new_volume percentage < <(
+    awk -v current="$current" -v step="$step" -v direction="$direction" '
+      BEGIN {
+        if (current !~ /^[0-9]+([.][0-9]+)?$/) exit 1
+
+        upper = current > 1 ? current : 1
+        volume = current + (direction * step)
+        if (volume < 0) volume = 0
+        if (volume > upper) volume = upper
+
+        printf "%.10g %d\n", volume, int((volume * 100) + 0.5)
+      }
+    '
+  ); then
+    notify "Cider returned an invalid MPRIS volume."
+    return 1
+  fi
+
+  if ! busctl --user set-property \
+    "$CIDER_MPRIS_SERVICE" \
+    "$CIDER_MPRIS_PATH" \
+    "$CIDER_MPRIS_PLAYER_INTERFACE" \
+    Volume d "$new_volume" >/dev/null 2>&1; then
+    notify "Could not change Cider's MPRIS volume."
+    return 1
+  fi
+
+  if ! busctl --user call \
+    "$PLASMA_OSD_SERVICE" \
+    "$PLASMA_OSD_PATH" \
+    "$PLASMA_OSD_INTERFACE" \
+    mediaPlayerVolumeChanged \
+    iss "$percentage" "Cider" "Cider" >/dev/null 2>&1; then
+    notify "Cider volume changed, but Plasma's volume OSD failed."
+    return 1
+  fi
+}
+
+mpris_status() {
+  command -v busctl >/dev/null 2>&1 || return 1
+
+  busctl --user get-property \
+    "$CIDER_MPRIS_SERVICE" \
+    "$CIDER_MPRIS_PATH" \
+    "$CIDER_MPRIS_PLAYER_INTERFACE" \
+    PlaybackStatus 2>/dev/null | sed -E 's/^s "(.*)"$/\1/'
+}
+
+diagnose() {
+  local volume
+
+  echo "Cider MPRIS:"
+  if mpris_available; then
+    echo "  available: $CIDER_MPRIS_SERVICE"
+    echo "  status: $(mpris_status)"
+    if volume="$(mpris_volume)"; then
+      awk -v volume="$volume" 'BEGIN { printf "  volume: %.0f%% (%s)\n", volume * 100, volume }'
+    else
+      echo "  volume: unavailable"
+    fi
+  else
+    echo "  missing: $CIDER_MPRIS_SERVICE"
+  fi
+
+  echo
+  echo "Plasma media-player OSD:"
+  if plasma_osd_available; then
+    echo "  available: $PLASMA_OSD_SERVICE $PLASMA_OSD_PATH"
+  else
+    echo "  unavailable"
+  fi
+
+  echo
+  echo "playerctl:"
+  if command -v playerctl >/dev/null 2>&1; then
+    playerctl --list-all 2>/dev/null | sed 's/^/  /' || true
+  else
+    echo "  playerctl not installed"
+  fi
+
+  echo
+  echo "API fallback:"
+  echo "  configured host: ${CIDER_API_HOST}:${CIDER_API_PORT}"
+  if [[ -n "$CIDER_API_TOKEN" ]]; then
+    echo "  token: set"
+  else
+    echo "  token: not set"
+  fi
+  echo "  note: no safe status probe is used here because Cider REST playback endpoints are action endpoints."
+}
+
+case "${1:-}" in
+  play-pause|playpause)
+    runtime_dir="${XDG_RUNTIME_DIR:-/run/user/${UID}}"
+    exec {play_pause_lock_fd}>"${runtime_dir}/ciderctl-play-pause.lock" || exit 1
+    flock -n "$play_pause_lock_fd" || exit 0
+
+    if cider_running; then
+      play_pause
+    else
+      start_liked_songs
+    fi
+    ;;
+  play)
+    transport Play play
+    ;;
+  pause)
+    transport Pause pause
+    ;;
+  stop)
+    transport Stop stop
+    ;;
+  next)
+    transport Next next
+    ;;
+  previous|prev)
+    transport Previous previous
+    ;;
+  volume-up|up)
+    volume_change 1
+    ;;
+  volume-down|down)
+    volume_change -1
+    ;;
+  diagnose)
+    diagnose
+    ;;
+  *)
+    echo "Usage: ${0##*/} {play-pause|play|pause|stop|next|previous|volume-up|volume-down|diagnose}" >&2
+    exit 2
+    ;;
+esac

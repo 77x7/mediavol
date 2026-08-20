@@ -1,0 +1,19 @@
+{
+  "features": [
+    {"id": "core", "label": "Core tools", "default": true},
+    {"id": "automation", "label": "Custom automation and launchers", "default": true, "depends": ["core"]},
+    {"id": "plasma-style", "label": "Active Plasma style and assets", "default": true, "depends": ["core"]},
+    {"id": "plasma-settings", "label": "KDE shortcuts and KWin settings", "default": true, "depends": ["plasma-style"]},
+    {"id": "plasma-layout", "label": "Panels and widgets", "default": false, "depends": ["plasma-settings"]},
+    {"id": "xremap", "label": "Repeating volume shortcuts", "default": false, "depends": ["automation"]},
+    {"id": "cider", "label": "Cider and non-secret integration", "default": false, "depends": ["automation"]},
+    {"id": "emoji-cord", "label": "Emoji-cord Codeberg release", "default": false, "depends": ["core"]},
+    {"id": "flatpaks-user", "label": "User Flatpaks", "default": false},
+    {"id": "flatpaks-system", "label": "System Flatpaks", "default": false},
+    {"id": "gaming", "label": "Gaming packages and launchers", "default": false},
+    {"id": "nvidia", "label": "NVIDIA hardware profile", "default": false},
+    {"id": "ddc", "label": "DDC/CI brightness support", "default": false},
+    {"id": "openrgb", "label": "OpenRGB support", "default": false},
+    {"id": "manual-fonts", "label": "Manual fonts", "default": false}
+  ]
+}

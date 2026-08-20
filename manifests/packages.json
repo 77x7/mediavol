@@ -1,0 +1,49 @@
+{
+  "core": [
+    "curl",
+    "git",
+    "git-lfs",
+    "gum",
+    "jq",
+    "libnotify",
+    "rsync",
+    "util-linux"
+  ],
+  "automation": [
+    "cmake",
+    "kf6-kservice-devel",
+    "kdotool",
+    "libX11-devel",
+    "ninja-build",
+    "playerctl",
+    "procps-ng",
+    "pulseaudio-libs-devel",
+    "pulseaudio-utils",
+    "qt6-qtbase-devel"
+  ],
+  "plasma-style": [
+    "abattis-cantarell-vf-fonts",
+    "google-noto-sans-fonts",
+    "kvantum"
+  ],
+  "xremap": ["xremap-kde"],
+  "cider": ["Cider"],
+  "ddc": ["ddcutil", "libddcutil"],
+  "openrgb": ["openrgb", "openrgb-udev-rules"],
+  "emoji-cord-build": [
+    "cmake",
+    "gcc-c++",
+    "kf6-kwindowsystem-devel",
+    "libX11-devel",
+    "libXi-devel",
+    "libXtst-devel",
+    "libxkbcommon-devel",
+    "ninja-build",
+    "qt6-qtbase-devel",
+    "qt6-qtbase-private-devel",
+    "qt6-qtdeclarative-devel",
+    "qt6-qtwayland-devel",
+    "wayland-devel"
+  ],
+  "optional-fonts": ["jetbrainsmono-nerd-fonts"]
+}
